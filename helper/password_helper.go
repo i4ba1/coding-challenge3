@@ -2,69 +2,54 @@ package helper
 
 import (
 	"crypto/rand"
-	"crypto/subtle"
+	"crypto/sha512"
 	"encoding/base64"
-	"fmt"
-	"golang.org/x/crypto/argon2"
-	"math/big"
-	"strings"
 )
 
-type PasswordConfig struct {
-	Time    uint32
-	Memory  uint32
-	Threads uint8
-	KeyLen  uint32
+// Generate a random 16 bytes securely using the
+// Cryptographically secure pseudorandom number generator (CSPRNG)
+// int the crypto.rand package
+func GenerateRandomSalt(saltSize int) []byte {
+	var salt = make([]byte, saltSize)
+
+	_, err := rand.Read(salt[:])
+
+	if err != nil {
+		panic(err)
+	}
+
+	return salt
 }
 
-// GeneratePassword is used to generate a new password hash for storing and
-// comparing at a later date.
-func GeneratePassword(c *PasswordConfig, password string) (map[string]string, error) {
+// Combine our password and salt and hash them using the SHA-512
+// hashing algorithm and then return our hashed password
+// as a base64 encoded string
+func HashPassword(password string, salt []byte) string {
+	// Convert password string to byte slice
+	var passwordBytes = []byte(password)
 
-	// Generate a Salt
-	var keySize, _ = rand.Int(rand.Reader, big.NewInt(1000))
-	salt := make([]byte, keySize.Int64())
-	var full = make(map[string]string)
-	if _, err := rand.Read(salt); err != nil {
-		return full, err
-	}
+	// Create sha-512 hasher
+	var sha512Hasher = sha512.New()
 
-	hash := argon2.IDKey([]byte(password), salt, c.Time, c.Memory, c.Threads, c.KeyLen)
+	// Append salt to password
+	passwordBytes = append(passwordBytes, salt...)
 
-	// Base64 encode the salt and hashed password.
-	b64Salt := base64.RawStdEncoding.EncodeToString(salt)
-	b64Hash := base64.RawStdEncoding.EncodeToString(hash)
+	// Write password bytes to the hasher
+	sha512Hasher.Write(passwordBytes)
 
-	//format := "$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s"
-	full["password"] = b64Hash
-	full["salt"] = b64Salt
+	// Get the sha512 hashed password
+	var hashedPasswordBytes = sha512Hasher.Sum(nil)
 
-	return full, nil
+	// Convert the hashed password to a base64 encoded string
+	var base64EncodedPasswordHash =
+		base64.URLEncoding.EncodeToString(hashedPasswordBytes)
+
+	return base64EncodedPasswordHash
 }
 
-// ComparePassword is used to compare a user-inputted password to a hash to see
-// if the password matches or not.
-func ComparePassword(password, hash string)(bool, error) {
+// Check if two passwords match
+func DoPasswordsMatch(passwordHash, currPassword string, salt[]byte) bool {
+	var currPasswordHash = HashPassword(currPassword, salt)
 
-	parts := strings.Split(hash, "$")
-
-	c := &PasswordConfig{}
-	_, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &c.Memory, &c.Time, &c.Threads)
-	if err != nil {
-		return false, err
-	}
-
-	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
-	if err != nil {
-		return false, err
-	}
-
-	decodedHash, err := base64.RawStdEncoding.DecodeString(parts[5])
-	if err != nil {
-		return false, err
-	}
-
-	c.KeyLen = uint32(len(decodedHash))
-	comparisonHash := argon2.IDKey([]byte(password), salt, c.Time, c.Memory, c.Threads, c.KeyLen)
-	return subtle.ConstantTimeCompare(decodedHash, comparisonHash) == 1, nil
+	return passwordHash == currPasswordHash
 }

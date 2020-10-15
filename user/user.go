@@ -9,7 +9,7 @@ type User struct {
 	Email        string    `json:"email" validate:"required,email"`
 	DateOfBird   time.Time `json:"dateOfBirth" validate:"required"`
 	Sex          bool      `json:"sex" validate:"required"`
-	Salt         string    `json:"salt"`
+	Salt         []byte    `json:"salt"`
 	Password     string    `json:"password" validate:"required,min=6"`
 	CreatedAt    time.Time `json:"created_at"`
 }
