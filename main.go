@@ -8,10 +8,9 @@ import (
 )
 
 func main() {
-	r := router.Router()
+	r := router.SetupRouter()
 	// fs := http.FileServer(http.Dir("build"))
 	// http.Handle("/", fs)
 	fmt.Println("Starting server on the port 8787...")
-
 	log.Fatal(http.ListenAndServe(":8787", r))
 }

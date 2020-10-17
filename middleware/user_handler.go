@@ -12,13 +12,14 @@ import (
 	_ "github.com/lib/pq"      // postgres golang driver
 	"github.com/twinj/uuid"
 	"log"
-	"math/rand"
 	"net/http" // used to access the request and response object of the api
 	"os"       // used to read the environment variable
+	"reflect"
 	"strconv"
 	_ "strconv" // package used to covert string into int type
 	"strings"
 	"time"
+	"unsafe"
 )
 
 var client *redis.Client
@@ -39,25 +40,35 @@ func init() {
 	}
 }
 
+const (
+	host     	= "localhost"
+	port     	= 5440
+	username    = "mni"
+	password 	= "mni123!#"
+	dbname   	= "customer_db"
+)
 // create connection with postgres db
 func createConnection() *sql.DB {
 	// load .env file
 	err := godotenv.Load(".env")
 
+	psqlInfo := fmt.Sprintf("host=%s port=%d user=%s "+
+		"password=%s dbname=%s sslmode=disable",
+		host, port, username, password, dbname)
 	if err != nil {
 		log.Fatalf("Error loading .env file")
 	}
 
 	// Open the connection
-	db, err := sql.Open("postgres", os.Getenv("POSTGRES_URL"))
+	db, err := sql.Open("postgres", psqlInfo)
 
 	if err != nil {
 		panic(err)
 	}
+	//defer db.Close()
 
 	// check the connection
 	err = db.Ping()
-
 	if err != nil {
 		panic(err)
 	}
@@ -89,11 +100,18 @@ func CreateUser(w http.ResponseWriter, r *http.Request) {
 
 	if ok, errors := helper.ValidateInputs(*input); !ok {
 		validationResponse(errors, w)
+		return
 	}
 
-	_, err = getUser(input.Email, input.PhoneNumber)
+	result, err := getUser(input.Email, input.PhoneNumber)
 	if err != nil {
-		ErrorResponse(http.StatusConflict, "Email or Phone Number already used", w)
+		ErrorResponse(http.StatusUnprocessableEntity, "Invalid select email and phone number", w)
+		return
+	}
+
+	if len(result.CustomerId) > 0 {
+		ErrorResponse(http.StatusConflict, "Email or Phone Number already use", w)
+		return
 	}
 
 	// call insert input function and pass the input
@@ -218,6 +236,7 @@ func Login(w http.ResponseWriter, r *http.Request) {
 
 	if ok, errors := helper.ValidateInputs(*input); !ok {
 		validationResponse(errors, w)
+		return
 	}
 
 	data, err := loginUser(input)
@@ -229,6 +248,12 @@ func Login(w http.ResponseWriter, r *http.Request) {
 			ErrorResponse(http.StatusUnprocessableEntity, err.Error(), w)
 			return
 		}
+	}
+
+	saveErr := createAuth(data[1].CustomerId, ts)
+	if saveErr != nil {
+		ErrorResponse(http.StatusUnprocessableEntity, saveErr.Error(), w)
+		return
 	}
 
 	response := make(map[string]interface{})
@@ -249,7 +274,7 @@ func getUser(email string, phoneNumber string) (user.User, error) {
 	var u user.User
 
 	// create the select sql query
-	sqlStatement := `SELECT * FROM tbl_customer WHERE email=$1 or phone_number=$2`
+	sqlStatement := `SELECT customer_id, email, phone_number FROM tbl_customer WHERE email=$1 or phone_number=$2`
 
 	// execute the sql statement
 	row := db.QueryRow(sqlStatement, email, phoneNumber)
@@ -271,23 +296,14 @@ func getUser(email string, phoneNumber string) (user.User, error) {
 	return u, err
 }
 
-func generateCustomerId() string {
-	rand.Seed(time.Now().Unix())
-	//Only lowercase
-	charSet := "abcdedfghijklmnopqrstvwxyz"
-	var output strings.Builder
-	length := 10
-	for i := 0; i < length; i++ {
-		random := rand.Intn(len(charSet))
-		randomChar := charSet[random]
-		output.WriteString(string(randomChar))
-	}
-	fmt.Println(output.String())
-	return output.String()
-}
 
 // Define the size of the salt
 const saltSize = 16
+func BytesToString(b []byte) string {
+	bh := (*reflect.SliceHeader)(unsafe.Pointer(&b))
+	sh := reflect.StringHeader{bh.Data, bh.Len}
+	return *(*string)(unsafe.Pointer(&sh))
+}
 
 // insert one user in the DB
 func insertUser(user *user.UserDto) string {
@@ -300,18 +316,20 @@ func insertUser(user *user.UserDto) string {
 
 	// create the insert sql query
 	// returning userid will return the id of the inserted user
-	customerId := generateCustomerId()
-	sqlStatement := "INSERT INTO tbl_customer (customer_id, customer_name, phone_number, email, dob, sex, salt, password, created_date) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING customer_id"
+	customerId := helper.GenerateId()
+	sqlStatement := `INSERT INTO "tbl_customer" ("customer_id", "customer_name", "phone_number", "email", "dob", "sex", "salt", "password", "created_date") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
 
 	salt := helper.GenerateRandomSalt(saltSize)
-	password := helper.HashPassword(generateCustomerId(), salt)
+	fmt.Println("Generated password => ", helper.GenerateId())
+	password := helper.HashPassword(helper.GenerateId(), salt)
+	log.Println("salt ", BytesToString(salt), " password ",password)
 
-	err := db.QueryRow(sqlStatement, customerId, user.CustomerName, user.PhoneNumber, user.Email,
-		user.DateOfBird, user.Sex, salt, password, user.CreatedAt).Scan(&customerId)
+	result, err := db.Exec(sqlStatement, customerId, user.CustomerName, user.PhoneNumber, user.Email, user.DateOfBird.Local(), user.Sex, salt, password, time.Now().Local())
 
 	if err != nil {
-		log.Fatalf("Unable to execute the query. %v", err)
+		log.Fatalf("Unable to execute the query. %v", err.Error())
 	}
+	fmt.Println(result.RowsAffected())
 
 	fmt.Printf("Inserted a single record %v", customerId)
 
@@ -338,25 +356,18 @@ func loginUser(login *user.LoginDto) (map[int]ResponseLoginDto, error) {
 	sqlStatement := ""
 	if result1 < 0 {
 		// create the select sql query
-		sqlStatement = `SELECT customer_id,password,salt FROM tbl_customer WHERE email=? and password=?`
+		sqlStatement = "SELECT customer_id,password,salt FROM tbl_customer WHERE phone_number=$1"
 	} else {
-		sqlStatement = `SELECT customer_id,password,salt FROM tbl_customer WHERE phone_number=? and password=?`
+		sqlStatement = "SELECT customer_id,password,salt FROM tbl_customer WHERE email=$1"
 	}
 
 	// execute the sql statement
-	stmt, err := db.Prepare(sqlStatement)
-
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer stmt.Close()
-	var password string
 	var salt string
+	var password string
 	var customerId string
-	err = stmt.QueryRow(1, 2).Scan(&password, &salt, &customerId)
-
+	err := db.QueryRow(sqlStatement, login.Username).Scan(&customerId, &password, &salt)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Failed to execute query: ", err)
 	}
 	fmt.Println("Password: " + password + " SaltSize: " + salt)
 

@@ -3,7 +3,6 @@ package user
 import "time"
 
 type UserDto struct {
-	CustomerId   string    `json:"id"`
 	CustomerName string    `json:"customer_name" validate:"required"`
 	PhoneNumber  string    `json:"phone_number" validate:"required,min=11"`
 	Email        string    `json:"email" validate:"required,email"`
